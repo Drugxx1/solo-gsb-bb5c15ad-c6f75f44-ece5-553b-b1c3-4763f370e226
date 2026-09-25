@@ -5,4 +5,12 @@ services:
     container_name: label-imposition
     ports:
       - "8000:8000"
+    volumes:
+      # 纸张库存与领料记录（SQLite，/app/data/label_stock.db）
+      # 使用命名卷持久化：容器重启 / 重建（docker compose up --build）后
+      # 库存余量与领料记录仍然保留
+      - label-stock-data:/app/data
     restart: unless-stopped
+
+volumes:
+  label-stock-data:

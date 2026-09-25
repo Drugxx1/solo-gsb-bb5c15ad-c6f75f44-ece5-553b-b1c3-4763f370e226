@@ -202,3 +202,60 @@ class ReprintRequest(BaseModel):
         description="打印位置校准数据；提供时按拟合误差的逆变换修正导出坐标"
         "（与 /api/svg 的校准语义一致）",
     )
+
+
+# ---------------- 纸张库存与领料 ----------------
+
+
+class StockRegisterRequest(BaseModel):
+    """纸张库存登记：按纸宽 × 纸高（毫米）入库若干张。
+
+    同一纸型重复登记会累加余量；纸宽 / 纸高统一保留 2 位小数作为纸型
+    唯一标识，领料时纸张尺寸必须与之完全一致。
+    """
+
+    paper_width: float = Field(..., gt=0, description="纸张宽度 mm")
+    paper_height: float = Field(..., gt=0, description="纸张高度 mm")
+    quantity: int = Field(..., ge=1, description="本次入库张数（正整数，累加到余量）")
+
+
+class StockItem(BaseModel):
+    """一种纸型的当前库存余量。"""
+
+    paper_width: float
+    paper_height: float
+    quantity: int = Field(..., description="当前余量（张）")
+    updated_at: str | None = Field(None, description="最近入库时间")
+
+
+class RequisitionConfirmRequest(BaseModel):
+    """确认领料请求：领料单号 + 当前拼版参数。
+
+    服务端收到后用 params **重新计算拼版**，仅在所有标签全部排入、
+    且纸张宽高与库存纸型完全一致时，按实际页数扣减余量，并写入领料
+    记录。同一 order_no 重试时：参数指纹一致则返回原记录不重复扣纸；
+    参数变化返回 HTTP 409 冲突。
+    """
+
+    order_no: str = Field(
+        ..., min_length=1, max_length=40, description="领料单号（业务幂等键）"
+    )
+    params: LayoutRequest
+
+
+class RequisitionResult(BaseModel):
+    """领料确认结果（同时也是近期领料记录中每条记录的形状）。"""
+
+    reused: bool = Field(
+        False,
+        description="true 表示命中同单号同参数的原记录，本次未重新计算扣纸",
+    )
+    order_no: str
+    paper_width: float
+    paper_height: float
+    pages_required: int = Field(..., description="服务端重算拼版后的实际用纸页数")
+    labels_requested: int
+    labels_placed: int
+    stock_before: int = Field(..., description="扣减前该纸型余量（张）")
+    stock_after: int = Field(..., description="扣减后该纸型余量（张）")
+    created_at: str

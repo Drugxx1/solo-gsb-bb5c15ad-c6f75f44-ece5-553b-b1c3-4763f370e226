@@ -529,6 +529,129 @@ def main() -> int:
         raise AssertionError("补偿后未选标签出界，整页校验应失败")
     ensure_calibrated_bounds(gp, 1, cal_down, only={0})  # 顶部标签不越界
 
+    # ---- 纸张库存与领料：登记、事务扣纸、幂等重试、冲突与库存不足 ----
+    from .db import connect as db_connect, create_schema
+    from .stock import (
+        StockConflict,
+        confirm_requisition,
+        list_requisitions,
+        list_stock,
+        register_stock,
+    )
+
+    test_conn = db_connect(":memory:")
+    create_schema(test_conn)
+
+    # 40×40 纸面排 20×20 标签，每页 4 个；10 个标签恰好 3 页
+    req_stock = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[LabelSpec(width=20, height=20, count=10)],
+    )
+    assert len(compute_layout(req_stock).pages) == 3
+
+    # 纸型未登记：409 式冲突，提示所需页数与余量 0
+    try:
+        confirm_requisition(test_conn, "LL-001", req_stock)
+    except StockConflict as exc:
+        assert "需要 3 张" in str(exc) and "余量 0 张" in str(exc), str(exc)
+    else:
+        raise AssertionError("未登记库存却允许领料")
+
+    # 登记 5 张（重复登记累加）
+    item = register_stock(test_conn, 40, 40, 3)
+    assert item.quantity == 3
+    item = register_stock(test_conn, 40, 40, 2)
+    assert item.quantity == 5
+    assert {(s.paper_width, s.paper_height, s.quantity) for s in list_stock(test_conn)} \
+        == {(40.0, 40.0, 5)}
+
+    # 库存不足：需要 3 张时余量 5 张其实足够；先验不足分支——
+    # 另一纸型 30×30 同标签每页 1 个，10 个需 10 页，未登记 → 0 张
+    req_other = LayoutRequest(
+        page_width=30, page_height=30,
+        labels=[LabelSpec(width=20, height=20, count=10)],
+    )
+    try:
+        confirm_requisition(test_conn, "LL-002", req_other)
+    except StockConflict as exc:
+        assert "需要 10 张" in str(exc) and "余量 0 张" in str(exc), str(exc)
+    else:
+        raise AssertionError("纸型不匹配却允许领料")
+    # 冲突回滚后仍只有一条库存、余量不变
+    assert list_stock(test_conn)[0].quantity == 5
+    assert list_requisitions(test_conn) == []
+
+    # 正常确认：按实际页数 3 扣纸，余量 5 → 2，并写入领料记录
+    res = confirm_requisition(test_conn, "LL-001", req_stock)
+    assert res["reused"] is False
+    assert res["pages_required"] == 3
+    assert res["labels_requested"] == 10 and res["labels_placed"] == 10
+    assert res["stock_before"] == 5 and res["stock_after"] == 2
+    assert list_stock(test_conn)[0].quantity == 2
+
+    # 同单号 + 同参数重试：返回原记录（reused=True），不重复扣纸
+    again = confirm_requisition(test_conn, "LL-001", req_stock)
+    assert again["reused"] is True
+    assert again["created_at"] == res["created_at"]
+    assert again["stock_before"] == 5 and again["stock_after"] == 2
+    assert list_stock(test_conn)[0].quantity == 2
+    assert len(list_requisitions(test_conn)) == 1
+
+    # 同单号但参数变化（份数 10 → 6）：冲突，不扣纸
+    req_changed = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[LabelSpec(width=20, height=20, count=6)],
+    )
+    try:
+        confirm_requisition(test_conn, "LL-001", req_changed)
+    except StockConflict as exc:
+        assert "已存在但参数与本次不同" in str(exc), str(exc)
+    else:
+        raise AssertionError("同单号参数变化应报冲突")
+    assert list_stock(test_conn)[0].quantity == 2
+    assert len(list_requisitions(test_conn)) == 1
+
+    # 库存不足：余量 2，新单需要 3 张 → 提示所需页数、余量与差额
+    try:
+        confirm_requisition(test_conn, "LL-003", req_stock)
+    except StockConflict as exc:
+        msg = str(exc)
+        assert "需要 3 张" in msg and "余量仅 2 张" in msg and "还差 1 张" in msg, msg
+    else:
+        raise AssertionError("库存不足却允许领料")
+    assert list_stock(test_conn)[0].quantity == 2
+    assert len(list_requisitions(test_conn)) == 1
+
+    # 标签未全部排入（巨标）：不扣纸、不写记录
+    req_unfit = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[
+            LabelSpec(width=20, height=20, count=1),
+            LabelSpec(name="巨标", width=80, height=80, count=2),
+        ],
+    )
+    try:
+        confirm_requisition(test_conn, "LL-004", req_unfit)
+    except StockConflict as exc:
+        assert "未能排入" in str(exc), str(exc)
+    else:
+        raise AssertionError("存在未排入标签却允许领料")
+    assert list_stock(test_conn)[0].quantity == 2
+    assert len(list_requisitions(test_conn)) == 1
+
+    # 余量恰好足够：补登记 1 张后新单扣 3 张，余量归零
+    register_stock(test_conn, 40, 40, 1)
+    res2 = confirm_requisition(test_conn, "LL-005", req_stock)
+    assert res2["stock_before"] == 3 and res2["stock_after"] == 0
+    records = list_requisitions(test_conn)
+    assert [r["order_no"] for r in records] == ["LL-005", "LL-001"]
+
+    # 纸宽 / 纸高按 2 位小数归一：40.004 与 40.0 视为同一纸型
+    fuzzy = register_stock(test_conn, 40.004, 40.0, 1)
+    assert fuzzy.paper_width == 40.0 and fuzzy.quantity == 1
+
+    test_conn.close()
+
 
     print(f"[bootstrap] 自检通过（FastAPI {fastapi.__version__}, "
           f"Pydantic {pydantic.VERSION}）")

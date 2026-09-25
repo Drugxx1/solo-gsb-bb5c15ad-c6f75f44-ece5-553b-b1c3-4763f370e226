@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, Response
+import sqlite3
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .calibration import (
@@ -13,20 +14,36 @@ from .calibration import (
     ensure_calibrated_bounds,
     solve_calibration,
 )
+from .db import db_session, init_db
 from .layout import compute_layout
 from .models import (
     Calibration,
     CalibrationData,
     LayoutRequest,
     LayoutResponse,
+    RequisitionConfirmRequest,
+    RequisitionResult,
     ReprintRequest,
+    StockItem,
+    StockRegisterRequest,
     SvgRequest,
+)
+from .stock import (
+    StockConflict,
+    confirm_requisition,
+    list_requisitions,
+    list_stock,
+    register_stock,
 )
 from .svg import build_calibration_page, build_reprint_svg, build_svg, resolve_reprint_selection
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-app = FastAPI(title="小批量标签拼版工具", version="1.3.0")
+# 导入时确保默认数据库文件与表存在（幂等）；每个请求另开独立连接，
+# 由 SQLite 写锁 + BEGIN IMMEDIATE 保证领料事务的并发正确
+init_db()
+
+app = FastAPI(title="小批量标签拼版工具", version="1.4.0")
 
 
 @app.get("/health", tags=["meta"])
@@ -94,7 +111,9 @@ def api_reprint(req: ReprintRequest) -> Response:
     return Response(
         content=svg,
         media_type="image/svg+xml; charset=utf-8",
-        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"'
+        },
     )
 
 
@@ -138,6 +157,82 @@ def api_calibration_solve(req: CalibrationData) -> Calibration:
         return solve_calibration(req)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------- 纸张库存与领料 ----------------
+
+
+@app.get("/api/stock", response_model=list[StockItem], tags=["stock"])
+def api_stock_list(
+    conn: sqlite3.Connection = Depends(db_session),
+) -> list[StockItem]:
+    """查看全部纸型的当前余量（张）。"""
+    return list_stock(conn)
+
+
+@app.post(
+    "/api/stock", response_model=StockItem, tags=["stock"], status_code=201
+)
+def api_stock_register(
+    req: StockRegisterRequest,
+    conn: sqlite3.Connection = Depends(db_session),
+) -> StockItem:
+    """按纸宽 × 纸高登记入库；同一纸型重复登记累加余量。"""
+    return register_stock(
+        conn, req.paper_width, req.paper_height, req.quantity
+    )
+
+
+@app.post(
+    "/api/requisitions",
+    response_model=RequisitionResult,
+    tags=["stock"],
+)
+def api_requisition_confirm(
+    req: RequisitionConfirmRequest,
+    conn: sqlite3.Connection = Depends(db_session),
+) -> JSONResponse:
+    """确认领料：服务端用当前参数重新计算拼版，全部标签排入且纸型尺寸
+    与库存完全匹配时，在单个 SQLite 事务内按实际页数扣纸并写领料记录。
+
+    - 同单号 + 同参数重试：返回原记录（reused=true，HTTP 200），不重复扣纸；
+    - 同单号但参数变化：HTTP 409 冲突，不扣纸；
+    - 标签未全部排入：HTTP 400；
+    - 纸型未登记 / 尺寸不匹配 / 余量不足：HTTP 409，错误信息给出
+      所需页数与当前余量。
+    """
+    if not req.order_no.strip():
+        raise HTTPException(status_code=400, detail="领料单号不能为空。")
+    try:
+        result = confirm_requisition(conn, req.order_no, req.params)
+    except StockConflict as exc:
+        msg = str(exc)
+        # 同单号参数变化是真正的冲突（409）；其余业务不满足（未全部
+        # 排入属参数问题 400；库存 / 纸型问题按库存状态冲突 409）
+        if msg.startswith("当前拼版有"):
+            raise HTTPException(status_code=400, detail=msg) from exc
+        raise HTTPException(status_code=409, detail=msg) from exc
+    except ValueError as exc:
+        # 拼版本身非法（如页边距过大、占用区越界）
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 首次确认 201；同单号同参数重试命中原记录 200（未重新扣纸）
+    return JSONResponse(
+        content=RequisitionResult(**result).model_dump(),
+        status_code=200 if result["reused"] else 201,
+    )
+
+
+@app.get(
+    "/api/requisitions",
+    response_model=list[RequisitionResult],
+    tags=["stock"],
+)
+def api_requisition_list(
+    limit: int = Query(10, ge=1, le=100, description="返回最近多少条"),
+    conn: sqlite3.Connection = Depends(db_session),
+) -> list[RequisitionResult]:
+    """近期领料记录（最新在前）。"""
+    return [RequisitionResult(**r) for r in list_requisitions(conn, limit)]
 
 
 # 静态资源（index.html / app.js / style.css）

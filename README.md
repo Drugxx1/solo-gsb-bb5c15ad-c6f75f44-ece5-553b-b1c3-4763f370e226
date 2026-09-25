@@ -30,12 +30,21 @@
 页码标记与页边距线均留白，把原纸放回打印机即可原位重印。补印导出
 同样应用打印校准补偿；选择为空或序号越界时返回明确中文错误。
 
-技术栈：Python 3.11 + FastAPI + 原生 HTML / CSS / JavaScript（无前端构建）。
+支持**纸张库存领料**：按纸宽 × 纸高（毫米）登记纸张库存并随时查看各
+纸型余量；「确认领料」时服务端用当前参数**重新计算拼版**，仅当所有
+标签全部排入、且纸张宽高与库存纸型**完全一致**时，才按**实际页数**
+在单个 SQLite 事务内完成库存核对、余量扣减与领料记录写入。同一领料
+单号 + 同一参数重试只返回原记录、**不重复扣纸**；单号相同但参数变化
+返回冲突（HTTP 409）；库存不足时错误信息同时给出所需页数与当前余量。
+库存与领料记录通过 Docker Compose 命名卷持久化。
+
+技术栈：Python 3.11 + FastAPI + SQLite（标准库，零额外依赖）+ 原生
+HTML / CSS / JavaScript（无前端构建）。
 
 ## 一条命令启动
 
-无需任何额外配置（不依赖数据库，仅需 Docker / Docker Compose）。
-在项目根目录执行：
+无需任何额外配置（仅需 Docker / Docker Compose；SQLite 为 Python 标准库，
+无需另装数据库）。在项目根目录执行：
 
 ```bash
 docker compose up --build
@@ -50,8 +59,13 @@ docker compose up --build
 被占用，将其中左侧端口改为其它值（例如 `18000:8000`）后重新启动即可。
 停止：`Ctrl+C`，或在另一个终端执行 `docker compose down`。
 
-> 容器启动时会自动执行：安装依赖 → 初始化自检（排版、SVG 生成与
-> 打印校准的冒烟测试）→ 启动 uvicorn。
+库存与领料记录保存在容器内 `/app/data/label_stock.db`（SQLite），
+通过命名卷 `label-stock-data` 持久化：`docker compose up --build`
+重建容器后数据仍在；如需彻底清空，执行
+`docker compose down -v`（会同时删除数据卷）。
+
+> 容器启动时会自动执行：安装依赖 → 初始化自检（排版、SVG 生成、
+> 打印校准与库存领料事务的冒烟测试）→ 启动 uvicorn。
 
 ## 功能说明
 
@@ -157,6 +171,33 @@ docker compose up --build
        从下往上读数或刻线对错位）；
     3. **补偿后内容超出纸张**——逆变换使任一标签的修正位置越出
        纸张边界，错误信息给出该标签与修正后坐标。
+- **纸张库存与领料**（页面右下方面板）：
+  - **登记库存**：按「纸宽 (mm) × 纸高 (mm) + 入库张数」登记，
+    纸宽 / 纸高统一保留 2 位小数；同一纸型重复登记**累加余量**，
+    「当前库存余量」表实时列出每种纸型的余量与最近入库时间，
+    也可用「用左侧当前纸张尺寸填入」一键带入拼版纸型；
+  - **确认领料**：填写领料单号（打开页面自动生成
+    `LL-YYYYMMDD-HHMMSS`，可手动修改或「换一个」），点击
+    「确认领料并扣纸」——服务端用**左侧表单当前参数重新计算拼版**，
+    前端预览的页数不参与判定：
+    1. 所有标签**全部排入**（任一标签有未排入份数则拒绝，HTTP 400）；
+    2. 拼版纸宽、纸高与库存纸型**完全一致**（宽、高方向分别精确匹配，
+       不自动旋转纸型；未登记视为余量 0）；
+    3. 余量 ≥ 实际页数；
+    三者同时满足才扣纸，扣除张数 = 服务端重算的**实际页数**；
+  - **SQLite 事务**：库存核对、余量扣减、领料记录写入在同一个
+    `BEGIN IMMEDIATE` 事务中原子提交，失败整体回滚，不会出现扣了纸
+    却没记录或库存为负；
+  - **重试幂等**：同一领料单号 + 相同参数再次提交，返回原领料记录
+    （响应中 `reused=true`，HTTP 200），**不重新计算扣纸**、余量不变；
+    单号相同但参数变化返回 **HTTP 409 冲突**，明确提示原记录内容；
+  - **库存不足提示**：错误信息同时给出本次实际所需页数、当前余量与
+    差额（或纸型未登记时提示余量 0 张），例如：
+    `纸型 210×297mm 库存不足：本次拼版实际需要 6 张，当前余量仅 4 张，
+    还差 2 张；请补登记库存后重试。`
+  - 页面下方展示本次确认结果（用纸页数、排入数、扣减前后余量）与
+    **近期领料记录**（最近 10 条：单号、纸型、页数、排入、余量变化、
+    时间）；数据保存在 SQLite 并通过 Compose 命名卷持久化。
 
 ## 接口
 
@@ -169,6 +210,10 @@ docker compose up --build
 | GET  | `/api/calibration/page?page_width=&page_height=` | 下载校准测试页 SVG（横、纵两组基准刻线） |
 | GET  | `/api/calibration/marks?page_width=&page_height=` | 返回测试页两组基准刻线的设计坐标 JSON（界面自动填表） |
 | POST | `/api/calibration/solve` | 提交两组「设计 / 实测」刻线坐标，返回 X / Y 拟合结果 `scale`、`offset` |
+| GET  | `/api/stock` | 查看全部纸型当前余量（纸宽、纸高、张数、最近入库时间） |
+| POST | `/api/stock` | 按 `paper_width` / `paper_height` / `quantity` 登记入库；同纸型累加余量，返回该纸型最新余量 |
+| POST | `/api/requisitions` | 确认领料：`{order_no, params}`，服务端用 params 重算拼版，全部排入且纸型匹配、余量充足时在 SQLite 事务内按实际页数扣纸并写记录；成功 HTTP 201，同单号同参数重试返回 HTTP 200 + 原记录（`reused=true`）不重复扣纸，同单号参数变化 / 纸型未登记 / 余量不足返回 HTTP 409，有标签未排入或拼版参数非法返回 HTTP 400 |
+| GET  | `/api/requisitions?limit=10` | 近期领料记录（最新在前，默认 10 条，最多 100 条） |
 
 `/api/svg` 在服务端重新计算同一份排版，保证导出坐标与预览一致。
 其 `show_occupied` 开关仅预览时为 `true`（第一页灰色绘制占用区）；
@@ -291,31 +336,89 @@ API 文档（Swagger）：http://localhost:8000/docs
 请重新生成拼版后按最新预览点选。
 ```
 
+### 库存与领料请求示例
+
+登记库存（纸宽 210、纸高 297，入库 100 张；同纸型再次调用会累加）：
+
+```bash
+curl -X POST http://localhost:8000/api/stock \
+  -H 'Content-Type: application/json' \
+  -d '{"paper_width": 210, "paper_height": 297, "quantity": 100}'
+```
+
+确认领料（`params` 与 `/api/layout` 请求体完全一致）：
+
+```bash
+curl -X POST http://localhost:8000/api/requisitions \
+  -H 'Content-Type: application/json' \
+  -d '{"order_no": "LL-20260925-001", "params": {
+    "page_width": 210, "page_height": 297,
+    "margin_top": 8, "margin_right": 8, "margin_bottom": 8, "margin_left": 8,
+    "gap_x": 2, "gap_y": 2,
+    "labels": [{"name": "品名标签", "width": 60, "height": 30, "count": 20}]
+  }}'
+```
+
+首次成功返回 HTTP 201，例如：
+
+```json
+{
+  "reused": false,
+  "order_no": "LL-20260925-001",
+  "paper_width": 210.0,
+  "paper_height": 297.0,
+  "pages_required": 2,
+  "labels_requested": 20,
+  "labels_placed": 20,
+  "stock_before": 100,
+  "stock_after": 98,
+  "created_at": "2026-09-25T14:03:07"
+}
+```
+
+- 用**完全相同的请求体**（JSON 字段顺序不影响）再次提交：返回
+  HTTP 200，`reused=true` 且 `stock_before/stock_after/created_at`
+  与原记录一致，余量保持 98 不变；
+- 仅修改 `params`（如份数、纸宽、边距）后沿用同一 `order_no`：
+  HTTP 409，`detail` 说明单号已存在但参数不同，不扣纸；
+- 余量不足 / 纸型未登记：HTTP 409，`detail` 同时给出
+  **所需页数、当前余量（未登记为 0 张）与差额**；
+- 有标签未全部排入：HTTP 400（拼版结果仍可在页面正常预览）。
+
+数据库文件默认为项目根目录 `data/label_stock.db`，可用环境变量
+`LABEL_STOCK_DB` 指定其它路径；本地开发时容器外运行会自动创建该目录。
+
 ## 本地开发（不使用 Docker）
 
 ```bash
 pip install -r requirements.txt
-python -m app.bootstrap          # 可选：初始化自检
+python -m app.bootstrap          # 可选：初始化自检（含库存领料事务冒烟测试）
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+SQLite 数据库默认写入项目根目录 `data/label_stock.db`（自动创建），
+设置环境变量 `LABEL_STOCK_DB=/path/to/xxx.db` 可改用其它文件路径。
 
 ## 目录结构
 
 ```
 .
 ├── app/
-│   ├── main.py        # FastAPI 路由
-│   ├── models.py      # Pydantic 请求/响应模型（含流水号、校准模型）
+│   ├── main.py        # FastAPI 路由（含库存 / 领料接口）
+│   ├── models.py      # Pydantic 请求/响应模型（含流水号、校准、库存模型）
 │   ├── layout.py      # 天际线拼版算法
 │   ├── calibration.py # 走纸误差拟合、校准校验、测试页刻线坐标
 │   ├── svg.py         # SVG 生成（预览/导出/校准测试页）
+│   ├── db.py          # SQLite 连接、建表与会话依赖
+│   ├── stock.py       # 库存登记与领料事务（重算拼版、核对、扣减、幂等）
 │   └── bootstrap.py   # 启动初始化自检
 ├── static/
-│   ├── index.html     # 单页界面
+│   ├── index.html     # 单页界面（含纸张库存与领料面板）
 │   ├── style.css
 │   └── app.js
+├── data/              # 运行后生成：label_stock.db（已 gitignore；Compose 用命名卷持久化）
 ├── docker/entrypoint.sh
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml # 8000 端口映射 + label-stock-data 命名卷
 └── requirements.txt
 ```

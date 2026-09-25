@@ -15,8 +15,7 @@
   <main class="layout">
     <!-- 左侧：参数面板 -->
     <section class="panel">
-      <form id="params-form">
-        <fieldset>
+      <form id="params-form">        <fieldset>
           <legend>纸张</legend>
           <div class="row">
             <label>预设
@@ -136,6 +135,67 @@
           <button type="button" id="reprint-export" class="reprint-export" hidden>导出本页补印 SVG</button>
         </div>
         <div id="svg-host" class="svg-host"></div>
+      </div>
+    </section>
+
+    <!-- 纸张库存与领料（跨整行，显示在拼版结果下方） -->
+    <section class="panel stock-panel">
+      <h2 class="panel-title">纸张库存与领料</h2>
+      <p class="hint">按<strong>纸宽 × 纸高</strong>（毫米，精确到 0.01mm）登记纸张余量；
+        确认领料时服务端用<strong>左侧当前拼版参数重新计算拼版</strong>，仅当所有标签全部排入、
+        且纸张尺寸与库存纸型<strong>完全一致</strong>（宽、高方向都要相同，不自动旋转纸型）时，
+        才按实际页数从余量中扣纸并写入领料记录。同一领料单号重试不会重复扣纸。</p>
+
+      <div class="stock-grid">
+        <fieldset>
+          <legend>① 登记库存（入库累加）</legend>
+          <div class="row two">
+            <label>纸宽 (mm)<input type="number" id="stock-width" value="210" step="0.5" min="0.1" /></label>
+            <label>纸高 (mm)<input type="number" id="stock-height" value="297" step="0.5" min="0.1" /></label>
+          </div>
+          <div class="row two">
+            <label>入库张数<input type="number" id="stock-qty" value="100" step="1" min="1" /></label>
+            <label class="inline stock-fillbtn">
+              <button type="button" id="stock-use-page" class="ghost-mini">用左侧当前纸张尺寸填入</button>
+            </label>
+          </div>
+          <button type="button" id="stock-register" class="secondary">登记入库</button>
+        </fieldset>
+
+        <fieldset>
+          <legend>② 确认领料（按重算页数扣纸）</legend>
+          <div class="row">
+            <label>领料单号
+              <div class="order-row">
+                <input type="text" id="order-no" maxlength="40" placeholder="如 LL-20260925-001" />
+                <button type="button" id="order-regen" class="ghost-mini" title="重新生成一个单号">换一个</button>
+              </div>
+            </label>
+          </div>
+          <p class="hint">纸型取左侧「纸张」的当前纸宽 / 纸高；页数、是否全部排入均由服务端重新计算。
+            同单号同参数重复提交只返回原记录、不重复扣纸；同单号改参数会报冲突。</p>
+          <button type="button" id="requisition-confirm" class="primary-mini">确认领料并扣纸</button>
+          <div id="requisition-result"></div>
+        </fieldset>
+      </div>
+
+      <h3 class="block-title">当前库存余量</h3>
+      <div id="stock-list-wrap" class="stock-table-wrap">
+        <table class="stock-table">
+          <thead><tr><th>纸宽 (mm)</th><th>纸高 (mm)</th><th>余量（张）</th><th>最近入库</th></tr></thead>
+          <tbody id="stock-rows"></tbody>
+        </table>
+      </div>
+
+      <h3 class="block-title">近期领料记录</h3>
+      <div class="stock-table-wrap">
+        <table class="stock-table">
+          <thead><tr>
+            <th>领料单号</th><th>纸型 (mm)</th><th>用纸页数</th>
+            <th>标签排入</th><th>扣减前 → 扣减后（张）</th><th>确认时间</th>
+          </tr></thead>
+          <tbody id="requisition-rows"></tbody>
+        </table>
       </div>
     </section>
   </main>

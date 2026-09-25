@@ -261,3 +261,84 @@ button:disabled { opacity: 0.45; cursor: default; }
   pointer-events: none;
 }
 .svg-host svg .rp-idx.sel { fill: #b45309; font-weight: bold; }
+
+/* ---------------- 纸张库存与领料 ---------------- */
+
+.stock-panel { grid-column: 2; }
+@media (max-width: 900px) { .stock-panel { grid-column: 1; } }
+
+.panel-title {
+  margin: 0 0 6px; font-size: 15px; color: #111827;
+}
+.block-title {
+  margin: 14px 0 6px; font-size: 13px; color: #374151;
+}
+.stock-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 1100px) { .stock-grid { grid-template-columns: 1fr; } }
+.stock-grid fieldset { margin-bottom: 0; }
+.stock-fillbtn { justify-content: flex-end; }
+
+.order-row { display: flex; gap: 6px; margin-top: 3px; }
+.order-row input { flex: 1; margin-top: 0; }
+
+button.secondary {
+  width: 100%; background: #f3f4f6; border-color: var(--border);
+  font-size: 14px; padding: 9px; font-weight: 600; color: #1f2937;
+}
+button.secondary:hover { background: #e5e7eb; }
+button.primary-mini {
+  width: 100%; background: var(--accent); color: #fff;
+  border-color: var(--accent); font-size: 14px; padding: 9px; font-weight: 600;
+}
+button.primary-mini:hover { background: #1d4ed8; }
+button.ghost-mini {
+  border-style: dashed; color: var(--accent);
+  padding: 6px 10px; font-size: 12px; white-space: nowrap;
+}
+
+.stock-table-wrap { overflow-x: auto; }
+.stock-table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.stock-table th, .stock-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 10px; text-align: right; white-space: nowrap;
+}
+.stock-table th:first-child, .stock-table td:first-child { text-align: left; }
+.stock-table thead th {
+  background: #f9fafb; color: var(--muted); font-weight: 600;
+}
+.stock-table tbody tr:last-child td { border-bottom: none; }
+.stock-table .empty-row td {
+  text-align: center; color: var(--muted); padding: 14px;
+}
+.stock-table .zero { color: var(--danger); font-weight: 600; }
+.stock-table .reused-tag {
+  display: inline-block; margin-left: 6px; padding: 0 6px;
+  border-radius: 4px; font-size: 11px; font-weight: 600;
+  background: #e0e7ff; color: #3730a3;
+}
+
+.req-result {
+  margin-top: 10px; padding: 9px 11px; border-radius: 7px;
+  font-size: 13px; line-height: 1.7;
+}
+.req-result.ok {
+  background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0;
+}
+.req-result.reuse {
+  background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe;
+}
+.req-result.err {
+  background: #fef2f2; color: #991b1b; border: 1px solid #fecaca;
+}
+.req-result.muted {
+  background: #f3f4f6; color: #4b5563; border: 1px solid var(--border);
+}
+.req-result .big { font-size: 16px; font-weight: 700; }
+.req-result .muted { color: inherit; opacity: 0.75; font-size: 12px; }

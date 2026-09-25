@@ -655,3 +655,171 @@ addLabelRow({
 
 // 按默认纸张尺寸预填校准测试页的设计坐标（实测列留空）
 refreshCalMarks("");
+
+/* ---------------- 纸张库存与领料 ---------------- */
+
+function genOrderNo() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const date = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+  const time = `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `LL-${date}-${time}`;
+}
+
+function fmtDateTime(s) {
+  if (!s) return "—";
+  // 后端 ISO（本地时间，形如 2026-09-25T14:03:07）显示为 2026-09-25 14:03:07
+  return s.replace("T", " ");
+}
+
+async function refreshStock() {
+  const tbody = $("stock-rows");
+  try {
+    const resp = await fetch("/api/stock");
+    if (!resp.ok) throw new Error("库存查询失败");
+    const items = await resp.json();
+    if (!items.length) {
+      tbody.innerHTML =
+        `<tr class="empty-row"><td colspan="4">尚无库存：请在上方按纸宽、纸高登记入库。</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = items.map((it) => `
+      <tr>
+        <td>${it.paper_width}</td>
+        <td>${it.paper_height}</td>
+        <td class="${it.quantity <= 0 ? "zero" : ""}">${it.quantity}</td>
+        <td>${fmtDateTime(it.updated_at)}</td>
+      </tr>`).join("");
+  } catch (err) {
+    tbody.innerHTML =
+      `<tr class="empty-row"><td colspan="4">库存加载失败：${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+async function refreshRequisitions() {
+  const tbody = $("requisition-rows");
+  try {
+    const resp = await fetch("/api/requisitions?limit=10");
+    if (!resp.ok) throw new Error("领料记录查询失败");
+    const items = await resp.json();
+    if (!items.length) {
+      tbody.innerHTML =
+        `<tr class="empty-row"><td colspan="6">尚无领料记录：确认领料后这里会显示最近 10 条。</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = items.map((r) => `
+      <tr>
+        <td>${escapeHtml(r.order_no)}${r.reused ? '<span class="reused-tag">重试返回原记录</span>' : ""}</td>
+        <td>${r.paper_width} × ${r.paper_height}</td>
+        <td>${r.pages_required}</td>
+        <td>${r.labels_placed} / ${r.labels_requested}</td>
+        <td>${r.stock_before} → ${r.stock_after}</td>
+        <td>${fmtDateTime(r.created_at)}</td>
+      </tr>`).join("");
+  } catch (err) {
+    tbody.innerHTML =
+      `<tr class="empty-row"><td colspan="6">领料记录加载失败：${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+function showRequisitionResult(kind, html) {
+  const box = $("requisition-result");
+  box.className = `req-result ${kind}`;
+  box.innerHTML = html;
+}
+
+async function registerStock() {
+  const paper_width = parseFloat($("stock-width").value);
+  const paper_height = parseFloat($("stock-height").value);
+  const quantity = parseInt($("stock-qty").value, 10);
+  if (!(paper_width > 0) || !(paper_height > 0)) {
+    alert("纸宽、纸高必须为正数（毫米）。");
+    return;
+  }
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    alert("入库张数必须为正整数。");
+    return;
+  }
+  const resp = await fetch("/api/stock", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paper_width, paper_height, quantity }),
+  });
+  if (!resp.ok) {
+    alert(await apiError(resp, "库存登记失败"));
+    return;
+  }
+  const item = await resp.json();
+  showRequisitionResult(
+    "ok",
+    `已登记入库 <strong>${quantity}</strong> 张：纸型 <strong>${item.paper_width}×${item.paper_height}mm</strong>，` +
+    `当前余量 <strong class="big">${item.quantity}</strong> 张。`
+  );
+  await refreshStock();
+}
+
+async function confirmRequisition() {
+  const order_no = $("order-no").value.trim();
+  if (!order_no) {
+    alert("请填写领料单号（可用「换一个」生成）。");
+    return;
+  }
+  // 用左侧表单的当前参数提交；服务端会重新计算拼版与实际页数
+  const params = collectParams();
+  try {
+    validateParams(params);
+  } catch (err) {
+    showRequisitionResult("err", `<strong>参数错误：</strong>${escapeHtml(err.message)}`);
+    return;
+  }
+  const box = $("requisition-result");
+  box.className = "req-result muted";
+  box.textContent = "正在由服务端重新计算拼版并核对库存…";
+  let resp;
+  try {
+    resp = await fetch("/api/requisitions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order_no, params }),
+    });
+  } catch (err) {
+    showRequisitionResult("err", `<strong>请求失败：</strong>${escapeHtml(err.message)}`);
+    return;
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    showRequisitionResult(
+      "err",
+      `<strong>领料未确认（${resp.status === 409 ? "冲突 / 库存不满足" : "参数错误"}）：</strong>` +
+      `${escapeHtml(data.detail || "未知错误")}`
+    );
+    await Promise.all([refreshStock(), refreshRequisitions()]);
+    return;
+  }
+  const tag = data.reused
+    ? `<span class="reused-tag">同单号重试 · 未重复扣纸</span>`
+    : '<span class="reused-tag" style="background:#d1fae5;color:#065f46">领料已确认 · 已扣纸</span>';
+  showRequisitionResult(
+    data.reused ? "reuse" : "ok",
+    `<div>${tag}</div>` +
+    `领料单 <strong>${escapeHtml(data.order_no)}</strong>：纸型 <strong>${data.paper_width}×${data.paper_height}mm</strong>，` +
+    `服务端重算共 <strong class="big">${data.pages_required}</strong> 张纸，` +
+    `标签排入 <strong>${data.labels_placed}/${data.labels_requested}</strong>；<br/>` +
+    `余量 ${data.stock_before} → <strong class="big">${data.stock_after}</strong> 张。` +
+    `<div class="muted">确认时间：${fmtDateTime(data.created_at)}</div>`
+  );
+  await Promise.all([refreshStock(), refreshRequisitions()]);
+}
+
+// 初始化与事件
+$("order-no").value = genOrderNo();
+$("order-regen").addEventListener("click", () => { $("order-no").value = genOrderNo(); });
+$("stock-use-page").addEventListener("click", () => {
+  $("stock-width").value = $("page-width").value;
+  $("stock-height").value = $("page-height").value;
+});
+$("stock-register").addEventListener("click", registerStock);
+$("requisition-confirm").addEventListener("click", confirmRequisition);
+
+refreshStock();
+refreshRequisitions();

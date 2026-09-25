@@ -5,3 +5,4 @@ __pycache__/
 venv/
 *.svg
 .DS_Store
+data/
