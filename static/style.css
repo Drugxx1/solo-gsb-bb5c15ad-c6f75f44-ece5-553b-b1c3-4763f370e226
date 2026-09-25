@@ -191,6 +191,64 @@ button:disabled { opacity: 0.45; cursor: default; }
   background: #fee2e2; color: #991b1b; font-size: 13px;
 }
 
+/* ---------------- 纸张库存与领料 ---------------- */
+
+.stock-box { margin: 14px 0; }
+.stock-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(300px, 1.4fr);
+  gap: 18px;
+}
+@media (max-width: 760px) { .stock-grid { grid-template-columns: 1fr; } }
+.stock-col { min-width: 0; }
+.stock-title { font-size: 13px; margin: 2px 0 8px; color: #374151; }
+.stock-title.sub { margin-top: 14px; }
+.stock-add {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+.stock-add label { font-size: 12px; color: var(--muted); }
+.stock-add button { white-space: nowrap; padding: 7px 12px; }
+.stock-table-wrap { overflow-x: auto; }
+.stock-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.stock-table th, .stock-table td {
+  border-bottom: 1px solid var(--border); padding: 5px 8px; text-align: right;
+  white-space: nowrap;
+}
+.stock-table th:first-child, .stock-table td:first-child { text-align: left; }
+.stock-table .stock-empty td {
+  text-align: center; color: var(--muted); padding: 10px 8px;
+}
+.stock-table tr.low td { color: var(--danger); font-weight: 600; }
+.req-add {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+.req-add .req-no { font-size: 12px; color: var(--muted); }
+.ghost-sm {
+  border-style: dashed; color: var(--accent); padding: 7px 10px; white-space: nowrap;
+}
+.req-btn {
+  background: var(--ok); border-color: var(--ok); color: #fff;
+  font-weight: 600; padding: 7px 16px; white-space: nowrap;
+}
+.req-btn:hover { background: #166534; }
+.stock-msg, .req-result {
+  font-size: 12.5px; line-height: 1.6; border-radius: 6px;
+  padding: 8px 10px; margin: 6px 0;
+}
+.stock-msg.ok, .req-result.ok { background: #dcfce7; color: #14532d; }
+.stock-msg.err, .req-result.err { background: #fee2e2; color: #991b1b; }
+.req-result.retry { background: #fef9c3; color: #854d0e; }
+.req-result strong { font-weight: 700; }
+.req-detail { margin: 4px 0 0; }
+
 /* ---------------- 打印位置校准 ---------------- */
 
 .cal-tables {

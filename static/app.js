@@ -641,6 +641,154 @@ $("print-all").addEventListener("click", async () => {
   setTimeout(() => win.print(), 400);
 });
 
+/* ---------------- 纸张库存与领料 ---------------- */
+
+function fmtDim(v) {
+  // 与后端登记精度一致：去掉多余小数尾零
+  return String(Math.round(parseFloat(v) * 100) / 100);
+}
+function fmtTime(s) { return s ? s : "—"; }
+
+async function refreshStock() {
+  try {
+    const resp = await fetch("/api/stock");
+    if (!resp.ok) return;
+    const items = await resp.json();
+    const tbody = $("stock-rows");
+    if (!items.length) {
+      tbody.innerHTML = '<tr class="stock-empty"><td colspan="3">暂无库存，请先登记。</td></tr>';
+      return;
+    }
+    tbody.innerHTML = items.map((it) => `
+      <tr class="${it.quantity <= 0 ? "low" : ""}">
+        <td>${fmtDim(it.width_mm)}</td>
+        <td>${fmtDim(it.height_mm)}</td>
+        <td>${it.quantity}${it.quantity <= 0 ? "（已用尽）" : ""}</td>
+      </tr>`).join("");
+  } catch { /* 后端不可用时保持原状 */ }
+}
+
+async function refreshRequisitions() {
+  try {
+    const resp = await fetch("/api/requisitions?limit=15");
+    if (!resp.ok) return;
+    const items = await resp.json();
+    const tbody = $("req-rows");
+    if (!items.length) {
+      tbody.innerHTML = '<tr class="stock-empty"><td colspan="5">暂无领料记录。</td></tr>';
+      return;
+    }
+    tbody.innerHTML = items.map((r) => `
+      <tr>
+        <td>${escapeHtml(fmtTime(r.created_at))}</td>
+        <td>${escapeHtml(r.order_no)}</td>
+        <td>${fmtDim(r.width_mm)} × ${fmtDim(r.height_mm)}</td>
+        <td>${r.pages}</td>
+        <td>${r.labels_placed}/${r.labels_requested}</td>
+      </tr>`).join("");
+  } catch { /* 后端不可用时保持原状 */ }
+}
+
+function stockMsg(cls, html) {
+  const el = $("stock-msg");
+  el.hidden = false;
+  el.className = `stock-msg ${cls}`;
+  el.innerHTML = html;
+}
+function hideStockMsg() { $("stock-msg").hidden = true; }
+
+function reqResult(cls, html) {
+  const el = $("req-result");
+  el.hidden = false;
+  el.className = `req-result ${cls}`;
+  el.innerHTML = html;
+}
+function hideReqResult() { $("req-result").hidden = true; }
+
+function genOrderNo() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `LL-${stamp}`;
+}
+
+$("stock-register").addEventListener("click", async () => {
+  const w = parseFloat($("stock-width").value);
+  const h = parseFloat($("stock-height").value);
+  const q = parseInt($("stock-qty").value, 10);
+  if (!(w > 0) || !(h > 0)) { stockMsg("err", "纸宽、纸高必须为正数。"); return; }
+  if (!Number.isInteger(q) || q <= 0) { stockMsg("err", "入库张数必须为正整数。"); return; }
+  try {
+    const resp = await fetch("/api/stock", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ width: w, height: h, quantity: q }),
+    });
+    if (!resp.ok) throw new Error(await apiError(resp, "登记失败"));
+    const item = await resp.json();
+    stockMsg(
+      "ok",
+      `已入库：纸型 <strong>${fmtDim(item.width_mm)} × ${fmtDim(item.height_mm)}mm</strong>，` +
+      `当前余量 <strong>${item.quantity}</strong> 张。`
+    );
+    await refreshStock();
+  } catch (err) {
+    stockMsg("err", `<strong>登记失败：</strong>${escapeHtml(err.message)}`);
+  }
+});
+
+$("req-gen").addEventListener("click", () => {
+  $("req-no").value = genOrderNo();
+});
+
+$("req-confirm").addEventListener("click", async () => {
+  const orderNo = $("req-no").value.trim();
+  if (!orderNo) { reqResult("err", "请先填写领料单号（或点「生成」自动生成一个）。"); return; }
+  // 始终按当前表单参数收集并校验，服务端也会重新计算拼版
+  let params;
+  try {
+    params = collectParams();
+    validateParams(params);
+  } catch (err) {
+    reqResult("err", `<strong>拼版参数有误：</strong>${escapeHtml(err.message)}`);
+    return;
+  }
+  const btn = $("req-confirm");
+  btn.disabled = true;
+  btn.textContent = "确认中…";
+  try {
+    const resp = await fetch("/api/requisitions/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order_no: orderNo, params }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    const detail = data.detail || "领料失败";
+    if (resp.status === 409) {
+      reqResult("err",
+        `<strong>领料冲突（HTTP 409）：</strong>${escapeHtml(detail)}`);
+    } else if (!resp.ok) {
+      reqResult("err", `<strong>无法领料：</strong>${escapeHtml(detail)}`);
+    } else {
+      const head = data.retried
+        ? `⚠ 单号 <strong>${escapeHtml(data.order_no)}</strong> 参数一致，已返回<strong>原记录</strong>，库存<strong>未重复扣减</strong>。`
+        : `✔ 领料成功：单号 <strong>${escapeHtml(data.order_no)}</strong>` +
+          `，纸型 <strong>${fmtDim(data.page_width)} × ${fmtDim(data.page_height)}mm</strong>` +
+          `，按实际页数扣纸 <strong>${data.pages}</strong> 张。`;
+      reqResult(data.retried ? "retry" : "ok",
+        `${head}<p class="req-detail">标签排入 <strong>${data.labels_placed}</strong> / ${data.labels_requested}` +
+        `；记录时间 ${escapeHtml(data.created_at)}。</p>`);
+      await refreshStock();
+      await refreshRequisitions();
+    }
+  } catch (err) {
+    reqResult("err", `<strong>网络错误：</strong>${escapeHtml(err.message)}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "确认领料";
+  }
+});
+
 /* ---------------- 初始数据 ---------------- */
 
 addLabelRow({
@@ -655,3 +803,10 @@ addLabelRow({
 
 // 按默认纸张尺寸预填校准测试页的设计坐标（实测列留空）
 refreshCalMarks("");
+
+// 载入库存余量与近期领料记录
+refreshStock();
+refreshRequisitions();
+
+// 首次进入若单号为空，预填一个示例单号（可改）
+if (!$("req-no").value.trim()) $("req-no").value = genOrderNo();

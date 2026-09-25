@@ -5,4 +5,12 @@ services:
     container_name: label-imposition
     ports:
       - "8000:8000"
+    environment:
+      # SQLite 库存 / 领料数据库文件（容器内路径，挂载到下方命名卷持久化）
+      PAPER_DB_PATH: /data/paper.db
+    volumes:
+      - paper-data:/data
     restart: unless-stopped
+
+volumes:
+  paper-data:

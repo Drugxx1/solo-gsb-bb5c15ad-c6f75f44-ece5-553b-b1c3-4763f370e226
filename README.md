@@ -30,12 +30,22 @@
 页码标记与页边距线均留白，把原纸放回打印机即可原位重印。补印导出
 同样应用打印校准补偿；选择为空或序号越界时返回明确中文错误。
 
-技术栈：Python 3.11 + FastAPI + 原生 HTML / CSS / JavaScript（无前端构建）。
+支持**纸张库存与领料**：可按纸宽 × 纸高（毫米）登记纸张入库并查看
+各纸型余量（同纸型余量累加）。确认领料时填写唯一领料单号，**服务端
+用当前参数重新计算拼版**——仅当所有标签全部排入、且库存中存在尺寸
+完全相同的纸型时，才按拼版的**实际页数**扣纸；库存核对、扣减与领料
+记录写入在一个 **SQLite 事务**内完成。同一单号 + 同一参数重试只返回
+原记录、不重复扣纸；单号相同但参数变化返回 HTTP 409 冲突；余量不足
+时错误信息给出所需页数、当前余量与差额。页面右侧可直接看到每次确认
+结果与近期领料记录；库存数据通过 Docker Compose 命名卷持久化。
+
+技术栈：Python 3.11 + FastAPI + 原生 HTML / CSS / JavaScript（无前端构建），
+库存 / 领料数据使用 SQLite（Python 标准库，无额外服务）。
 
 ## 一条命令启动
 
-无需任何额外配置（不依赖数据库，仅需 Docker / Docker Compose）。
-在项目根目录执行：
+无需任何额外配置（仅需 Docker / Docker Compose；SQLite 数据库文件由
+Compose 命名卷自动创建并持久化）。在项目根目录执行：
 
 ```bash
 docker compose up --build
@@ -50,8 +60,13 @@ docker compose up --build
 被占用，将其中左侧端口改为其它值（例如 `18000:8000`）后重新启动即可。
 停止：`Ctrl+C`，或在另一个终端执行 `docker compose down`。
 
-> 容器启动时会自动执行：安装依赖 → 初始化自检（排版、SVG 生成与
-> 打印校准的冒烟测试）→ 启动 uvicorn。
+> 容器启动时会自动执行：安装依赖 → 初始化自检（排版、SVG 生成、
+> 打印校准与库存领料事务的冒烟测试）→ 启动 uvicorn。
+>
+> 库存 / 领料的 SQLite 文件位于容器内 `/data/paper.db`，挂载在命名卷
+> `paper-data` 上；`docker compose down` 不会删除数据，
+> `docker compose down -v` 才会连卷一起清空。可用环境变量
+> `PAPER_DB_PATH` 覆盖数据库文件路径（本地开发默认 `./data/paper.db`）。
 
 ## 功能说明
 
@@ -133,6 +148,33 @@ docker compose up --build
   - 本页未选择任何标签、或序号 / 页码超出范围时，界面与接口均给出
     明确中文错误（HTTP 400），不生成 SVG；
   - 普通预览、「下载本页 / 全部页」「打印全部页」行为完全不变。
+- **纸张库存与领料（SQLite 持久化）**：
+  - **登记库存**：在右侧「纸张库存 · 领料」中填写纸宽、纸高（毫米）
+    与入库张数后点击「登记入库」；同一纸宽 × 纸高重复登记时余量
+    **累加**，余量表格实时刷新，余量为 0 的纸型以红色「已用尽」标出；
+  - **确认领料**：填写（或点「生成」自动得到）领料单号后点击
+    「确认领料」。浏览器会把**当前表单中的拼版参数**发给服务端，
+    由服务端**重新计算拼版**（不信任本地结果）：
+    1. 任一标签未全部排入 → HTTP 400，列出各规格缺多少份，不扣纸；
+    2. 库存中没有纸宽 × 纸高**完全相同**（纵横不通用）的纸型
+       → HTTP 400，提示先登记该纸型；
+    3. 余量小于实际页数 → HTTP 400，错误信息明确给出
+       **所需页数、当前余量与差额**，例如
+       「实际需要 10 张，当前余量仅 7 张，还差 3 张」；
+    4. 全部通过时，在**单个 SQLite 事务**内完成余量核对、按实际
+       页数扣减、领料记录写入，任一环节失败整体回滚；
+  - **幂等重试**：同一领料单号 + 同一组拼版参数重复提交时返回
+    原领料记录（`retried=true, deducted=false`），**绝不重复扣纸**；
+    单号相同但参数有任何变化（页边距、间距、标签份数 / 尺寸等）时
+    返回 **HTTP 409 冲突**，提示单号已被使用、需更换单号或核对参数；
+  - 拼版参数先经规范化（浮点统一保留 6 位小数、忽略 JSON 键顺序）
+    再比较，因此 `210` 与 `210.0000001` 这类尾差不会被误判为参数变化；
+  - 页面展示本次确认结果（纸型、实际扣纸张数、排入标签数、记录时间，
+    重试时黄色提示「返回原记录、未重复扣减」），下方表格列出近期
+    领料记录（时间、单号、纸型、页数、排入 / 需求标签数）；
+  - 数据保存在 SQLite（`paper_stock`、`paper_requisitions` 两张表），
+    容器内路径 `/data/paper.db`，由 Compose 命名卷 `paper-data`
+    持久化；删除容器 / 重新 `up --build` 后库存与记录仍在。
 - **打印位置校准（可选，只影响下载 / 打印）**：
   - 点击「① 打开 / 下载校准测试页」，按当前纸张尺寸生成测试页
     （5 条纵向实线 X1–X5 沿纸宽均布、5 条横向虚线 Y1–Y5 沿纸高均布，
@@ -169,6 +211,10 @@ docker compose up --build
 | GET  | `/api/calibration/page?page_width=&page_height=` | 下载校准测试页 SVG（横、纵两组基准刻线） |
 | GET  | `/api/calibration/marks?page_width=&page_height=` | 返回测试页两组基准刻线的设计坐标 JSON（界面自动填表） |
 | POST | `/api/calibration/solve` | 提交两组「设计 / 实测」刻线坐标，返回 X / Y 拟合结果 `scale`、`offset` |
+| POST | `/api/stock` | 纸张入库登记：`{width, height, quantity}`（毫米 + 张）；同纸型余量累加，返回该纸型最新余量 |
+| GET  | `/api/stock` | 查看全部纸型当前余量（张），含余量为 0 的纸型 |
+| POST | `/api/requisitions/confirm` | 确认领料：`{order_no, params}`，服务端用 `params` 重新拼版，全部排入且纸型匹配时在一个事务内按实际页数扣纸并写记录；同单同参数重试返回原记录不扣纸，同单参数变化返回 409，未排入 / 未登记纸型 / 余量不足返回 400 |
+| GET  | `/api/requisitions?limit=20` | 近期领料记录（最新在前） |
 
 `/api/svg` 在服务端重新计算同一份排版，保证导出坐标与预览一致。
 其 `show_occupied` 开关仅预览时为 `true`（第一页灰色绘制占用区）；
@@ -291,11 +337,65 @@ API 文档（Swagger）：http://localhost:8000/docs
 请重新生成拼版后按最新预览点选。
 ```
 
+### 纸张库存与领料示例
+
+登记 A4 纵向纸 100 张（同纸型再登记会累加余量）：
+
+```bash
+curl -X POST http://localhost:8000/api/stock \
+  -H 'Content-Type: application/json' \
+  -d '{"width": 210, "height": 297, "quantity": 100}'
+```
+
+确认领料（`params` 与 `/api/layout` 的请求体完全一致）：
+
+```bash
+curl -X POST http://localhost:8000/api/requisitions/confirm \
+  -H 'Content-Type: application/json' \
+  -d '{"order_no": "LL-20260925-01", "params": { "page_width": 210, "...": "同 /api/layout" }}'
+```
+
+成功返回（`pages` 即实际扣纸张数，按当前参数重新拼版得出）：
+
+```json
+{
+  "order_no": "LL-20260925-01",
+  "page_width": 210.0,
+  "page_height": 297.0,
+  "pages": 2,
+  "labels_placed": 40,
+  "labels_requested": 40,
+  "deducted": true,
+  "retried": false,
+  "message": "领料成功：按实际页数 2 张扣纸。",
+  "created_at": "2026-09-25 10:12:33"
+}
+```
+
+同单号同参数再次提交时返回同一记录，`retried` 为 `true`、`deducted`
+为 `false`，库存不变；同单号但改了任何拼版参数返回 **HTTP 409**：
+
+```text
+领料单号「LL-20260925-01」已被使用且拼版参数不一致，不能改用新参数
+重复领料；请核对参数或更换单号。
+```
+
+余量不足（HTTP 400）时错误信息给出所需页数与余量：
+
+```text
+纸张 210 × 297mm 库存不足：本次拼版实际需要 10 张，当前余量仅 7 张，
+还差 3 张。请先补登记库存后再领料。
+```
+
 ## 本地开发（不使用 Docker）
+
+SQLite 数据库默认创建在项目根目录 `data/paper.db`（可用环境变量
+`PAPER_DB_PATH` 覆盖）：
 
 ```bash
 pip install -r requirements.txt
-python -m app.bootstrap          # 可选：初始化自检
+export PAPER_DB_PATH=./data/paper.db   # 可选：默认值即此路径
+python -m app.bootstrap          # 可选：初始化自检（含库存领料事务用例）
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -304,18 +404,20 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 .
 ├── app/
-│   ├── main.py        # FastAPI 路由
-│   ├── models.py      # Pydantic 请求/响应模型（含流水号、校准模型）
+│   ├── main.py        # FastAPI 路由（拼版 / SVG / 校准 / 库存领料）
+│   ├── models.py      # Pydantic 请求/响应模型（含库存、领料模型）
 │   ├── layout.py      # 天际线拼版算法
 │   ├── calibration.py # 走纸误差拟合、校准校验、测试页刻线坐标
 │   ├── svg.py         # SVG 生成（预览/导出/校准测试页）
+│   ├── stock.py       # SQLite 库存登记、领料事务（核对/扣减/写记录）
 │   └── bootstrap.py   # 启动初始化自检
 ├── static/
-│   ├── index.html     # 单页界面
+│   ├── index.html     # 单页界面（右侧含「纸张库存 · 领料」模块）
 │   ├── style.css
 │   └── app.js
+├── data/              # 本地开发默认 SQLite 目录（运行后生成，已 gitignore）
 ├── docker/entrypoint.sh
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml # 8000 端口 + paper-data 命名卷持久化 /data/paper.db
 └── requirements.txt
 ```

@@ -106,6 +106,57 @@
     <section class="panel result">
       <div id="summary" class="summary empty">填写参数后点击「生成拼版」。</div>
 
+      <!-- 纸张库存与领料 -->
+      <fieldset class="stock-box">
+        <legend>纸张库存 · 领料</legend>
+        <div class="stock-grid">
+          <div class="stock-col">
+            <h3 class="stock-title">库存登记 / 余量</h3>
+            <p class="hint">按纸宽、纸高登记纸张入库（张）；同一纸型再次登记余量累加。
+              仅当库存中存在<strong>完全相同纸宽 × 纸高</strong>的纸型时才可领料。</p>
+            <div class="stock-add">
+              <label>纸宽 (mm)<input type="number" id="stock-width" step="0.5" min="0.1" value="210" /></label>
+              <label>纸高 (mm)<input type="number" id="stock-height" step="0.5" min="0.1" value="297" /></label>
+              <label>入库张数<input type="number" id="stock-qty" step="1" min="1" value="100" /></label>
+              <button type="button" id="stock-register">登记入库</button>
+            </div>
+            <div id="stock-msg" class="stock-msg" hidden></div>
+            <div class="stock-table-wrap">
+              <table class="stock-table">
+                <thead><tr><th>纸宽 (mm)</th><th>纸高 (mm)</th><th>余量 (张)</th></tr></thead>
+                <tbody id="stock-rows">
+                  <tr class="stock-empty"><td colspan="3">暂无库存，请先登记。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="stock-col">
+            <h3 class="stock-title">确认领料</h3>
+            <p class="hint">点击「确认领料」时服务端按<strong>当前表单参数</strong>重新计算拼版：
+              只有<strong>所有标签全部排入</strong>且纸型尺寸与库存一致，才按实际页数扣纸；
+              同一领料单号 + 同一参数重复提交只返回原记录、不重复扣纸。</p>
+            <div class="req-add">
+              <label class="req-no">领料单号
+                <input type="text" id="req-no" maxlength="64" placeholder="如 LL-20260925-01" />
+              </label>
+              <button type="button" id="req-gen" class="ghost-sm" title="生成一个单号">生成</button>
+              <button type="button" id="req-confirm" class="req-btn">确认领料</button>
+            </div>
+            <div id="req-result" class="req-result" hidden></div>
+            <h3 class="stock-title sub">近期领料记录</h3>
+            <div class="stock-table-wrap">
+              <table class="stock-table req-table">
+                <thead><tr><th>时间</th><th>单号</th><th>纸型 (mm)</th><th>页数</th><th>标签</th></tr></thead>
+                <tbody id="req-rows">
+                  <tr class="stock-empty"><td colspan="5">暂无领料记录。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </fieldset>
+
       <div id="preview-wrap" class="preview-wrap" hidden>
         <div class="toolbar">
           <div class="pager">

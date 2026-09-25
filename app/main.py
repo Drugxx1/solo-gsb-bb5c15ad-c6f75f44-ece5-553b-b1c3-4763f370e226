@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -20,13 +21,34 @@ from .models import (
     LayoutRequest,
     LayoutResponse,
     ReprintRequest,
+    RequisitionItem,
+    RequisitionRequest,
+    RequisitionResult,
+    StockItem,
+    StockRegisterRequest,
     SvgRequest,
+)
+from .stock import (
+    StockConflict,
+    confirm_requisition,
+    init_db,
+    list_requisitions,
+    list_stock,
+    register_stock,
 )
 from .svg import build_calibration_page, build_reprint_svg, build_svg, resolve_reprint_selection
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-app = FastAPI(title="小批量标签拼版工具", version="1.3.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # 启动时确保 SQLite 库存 / 领料表存在（幂等）
+    init_db()
+    yield
+
+
+app = FastAPI(title="小批量标签拼版工具", version="1.4.0", lifespan=lifespan)
 
 
 @app.get("/health", tags=["meta"])
@@ -138,6 +160,73 @@ def api_calibration_solve(req: CalibrationData) -> Calibration:
         return solve_calibration(req)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------- 纸张库存与领料 ----------------
+
+
+@app.post("/api/stock", response_model=StockItem, tags=["stock"])
+def api_stock_register(req: StockRegisterRequest) -> StockItem:
+    """按纸宽 × 纸高登记入库；同一纸型再次登记时余量累加。"""
+    try:
+        item = register_stock(req.width, req.height, req.quantity)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return StockItem(**item)
+
+
+@app.get("/api/stock", response_model=list[StockItem], tags=["stock"])
+def api_stock_list() -> list[StockItem]:
+    """查看各纸型当前余量（张）。"""
+    return [StockItem(**item) for item in list_stock()]
+
+
+@app.post(
+    "/api/requisitions/confirm",
+    response_model=RequisitionResult,
+    tags=["stock"],
+)
+def api_requisition_confirm(req: RequisitionRequest) -> RequisitionResult:
+    """确认领料：服务端用当前参数重新计算拼版，全部标签排入且纸型匹配
+    时，在单个 SQLite 事务内按实际页数核对 / 扣减库存并写入领料记录。
+
+    - 同单号同参数重试：返回原记录（retried=true），不重复扣纸；
+    - 同单号参数变化：HTTP 409 冲突；
+    - 纸型未登记 / 余量不足 / 有标签未排入：HTTP 400，余量不足时
+      错误信息包含所需页数与当前余量。
+    """
+    try:
+        plan = compute_layout(req.params)
+        if plan.total_placed != plan.total_requested:
+            unplaced = plan.total_requested - plan.total_placed
+            names = "、".join(
+                f"「{s.name or s.type_index + 1}」缺 {s.unplaced} 份"
+                for s in plan.summaries if s.unplaced > 0
+            )
+            raise ValueError(
+                f"有 {unplaced} 个标签未能排入（{names}），不能领料："
+                "请调整纸张尺寸、页边距、间距或标签份数后重试。"
+            )
+        result = confirm_requisition(
+            req.order_no, req.params.model_dump(), plan
+        )
+    except StockConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RequisitionResult(**result)
+
+
+@app.get(
+    "/api/requisitions",
+    response_model=list[RequisitionItem],
+    tags=["stock"],
+)
+def api_requisition_list(
+    limit: int = Query(20, ge=1, le=200, description="返回最近 N 条"),
+) -> list[RequisitionItem]:
+    """近期领料记录（最新在前）。"""
+    return [RequisitionItem(**item) for item in list_requisitions(limit)]
 
 
 # 静态资源（index.html / app.js / style.css）

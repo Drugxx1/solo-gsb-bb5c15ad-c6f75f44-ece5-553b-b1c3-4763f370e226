@@ -529,6 +529,121 @@ def main() -> int:
         raise AssertionError("补偿后未选标签出界，整页校验应失败")
     ensure_calibrated_bounds(gp, 1, cal_down, only={0})  # 顶部标签不越界
 
+    # ---- 纸张库存与领料：SQLite 事务、幂等重试、冲突、余量不足 ----
+    import tempfile
+    from .stock import (
+        StockConflict,
+        canonicalize_params,
+        confirm_requisition,
+        list_requisitions,
+        list_stock,
+        register_stock,
+    )
+
+    # 参数规范化：浮点微差与键顺序不影响指纹，整数量保持独立
+    a = {"b": 1.0, "a": [210.0, {"x": 1.5}]}
+    b = {"a": [210.0000001, {"x": 1.5}], "b": 1.0}
+    assert canonicalize_params(a) == canonicalize_params(b)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dbp = f"{tmp}/paper.db"
+        from .stock import init_db
+        init_db(dbp)
+        assert register_stock(210, 297, 5, dbp)["quantity"] == 5
+        assert register_stock(210.0, 297.0, 3, dbp)["quantity"] == 8  # 同纸型累加
+        register_stock(297, 210, 3, dbp)
+
+        stock_req = LayoutRequest(
+            page_width=210, page_height=297,
+            margin_top=8, margin_right=8, margin_bottom=8, margin_left=8,
+            gap_x=2, gap_y=2,
+            labels=[LabelSpec(width=60, height=30, count=4)],
+        )
+        stock_plan = compute_layout(stock_req)
+        assert len(stock_plan.pages) == 1 and stock_plan.total_placed == 4
+
+        # 正常领料：按实际页数扣 1 张
+        res = confirm_requisition("LL-TEST-1", stock_req.model_dump(), stock_plan, dbp)
+        assert res["pages"] == 1 and res["deducted"] and not res["retried"]
+        assert list_stock(dbp)[0]["quantity"] == 7
+
+        # 同单号同参数（带浮点尾差）重试：返回原记录、不重复扣纸
+        again_req = stock_req.model_copy(
+            update={"page_width": 210.0000001}
+        )
+        again_plan = compute_layout(again_req)
+        res2 = confirm_requisition("LL-TEST-1", again_req.model_dump(), again_plan, dbp)
+        assert res2["retried"] and not res2["deducted"] and res2["pages"] == 1
+        assert list_stock(dbp)[0]["quantity"] == 7
+
+        # 同单号参数变化：冲突，库存不变
+        conflict_req = stock_req.model_copy(update={"gap_x": 4})
+        try:
+            confirm_requisition(
+                "LL-TEST-1", conflict_req.model_dump(),
+                compute_layout(conflict_req), dbp,
+            )
+            raise AssertionError("同单号参数变化应冲突")
+        except StockConflict as exc:
+            assert "参数不一致" in str(exc)
+        assert list_stock(dbp)[0]["quantity"] == 7
+
+        # 未全部排入：拒绝领料，不写记录、不扣纸
+        unfit_req = LayoutRequest(
+            page_width=210, page_height=297,
+            labels=[LabelSpec(width=500, height=500, count=2)],
+        )
+        unfit_plan = compute_layout(unfit_req)
+        assert unfit_plan.total_placed == 0
+        try:
+            confirm_requisition(
+                "LL-TEST-2", unfit_req.model_dump(), unfit_plan, dbp
+            )
+            raise AssertionError("有未排入标签时应拒绝领料")
+        except ValueError as exc:
+            assert "未排入" in str(exc)
+        assert len(list_requisitions(100, dbp)) == 1
+        assert list_stock(dbp)[0]["quantity"] == 7
+
+        # 余量不足：错误信息包含所需页数、当前余量与差额，事务回滚
+        many_req = LayoutRequest(
+            page_width=210, page_height=297,
+            labels=[LabelSpec(width=200, height=280, count=10)],
+        )
+        many_plan = compute_layout(many_req)
+        need_pages = len(many_plan.pages)
+        assert need_pages == 10, need_pages
+        try:
+            confirm_requisition(
+                "LL-TEST-3", many_req.model_dump(), many_plan, dbp
+            )
+            raise AssertionError("库存不足应拒绝领料")
+        except ValueError as exc:
+            msg = str(exc)
+            assert f"需要 {need_pages} 张" in msg and "余量仅 7 张" in msg, msg
+            assert f"还差 {need_pages - 7} 张" in msg
+        assert len(list_requisitions(100, dbp)) == 1  # 失败不写记录
+        assert list_stock(dbp)[0]["quantity"] == 7     # 失败不扣纸
+
+        # 纸型尺寸必须完全匹配：横向纸只能用横向库存（297×210 ≠ 210×297）
+        land_full_req = LayoutRequest(
+            page_width=297, page_height=210,
+            labels=[LabelSpec(width=100, height=140, count=6)],
+        )
+        land_plan = compute_layout(land_full_req)
+        land_need = len(land_plan.pages)
+        assert land_need == 3 and land_plan.total_placed == 6, land_need
+        res3 = confirm_requisition(
+            "LL-TEST-4", land_full_req.model_dump(), land_plan, dbp,
+        )
+        assert res3["pages"] == 3 and res3["deducted"]
+        land_row = [s for s in list_stock(dbp) if s["height_mm"] == 210.0][0]
+        assert land_row["quantity"] == 0
+
+        # 记录按最新在前排序
+        nos = [r["order_no"] for r in list_requisitions(100, dbp)]
+        assert nos == ["LL-TEST-4", "LL-TEST-1"], nos
+
 
     print(f"[bootstrap] 自检通过（FastAPI {fastapi.__version__}, "
           f"Pydantic {pydantic.VERSION}）")

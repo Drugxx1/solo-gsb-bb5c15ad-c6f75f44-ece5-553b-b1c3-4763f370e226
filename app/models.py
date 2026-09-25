@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Numbering(BaseModel):
@@ -202,3 +202,73 @@ class ReprintRequest(BaseModel):
         description="打印位置校准数据；提供时按拟合误差的逆变换修正导出坐标"
         "（与 /api/svg 的校准语义一致）",
     )
+
+
+# ---------------- 纸张库存与领料 ----------------
+
+
+class StockRegisterRequest(BaseModel):
+    """纸张入库登记：按纸宽 × 纸高登记，同纸型余量累加。"""
+
+    width: float = Field(..., gt=0, description="纸张宽度 mm")
+    height: float = Field(..., gt=0, description="纸张高度 mm")
+    quantity: int = Field(..., ge=1, description="本次入库张数（正整数）")
+
+
+class StockItem(BaseModel):
+    """一种纸型的当前库存余量。"""
+
+    id: int
+    width_mm: float
+    height_mm: float
+    quantity: int = Field(..., description="当前余量（张）")
+    created_at: str
+    updated_at: str
+
+
+class RequisitionRequest(BaseModel):
+    """领料确认请求：服务端用 params 重新计算拼版后再决定扣纸。"""
+
+    order_no: str = Field(
+        ..., min_length=1, max_length=64, description="领料单号（唯一，幂等重试凭据）"
+    )
+    params: LayoutRequest
+
+    @field_validator("order_no")
+    @classmethod
+    def _strip_order_no(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("领料单号不能为空。")
+        return v
+
+
+class RequisitionResult(BaseModel):
+    """领料确认结果。
+
+    retried=True 表示同单号同参数重试：返回原记录，deducted=False，
+    库存未重复扣减。
+    """
+
+    order_no: str
+    page_width: float
+    page_height: float
+    pages: int = Field(..., description="本次拼版实际页数（实际扣纸张数）")
+    labels_placed: int
+    labels_requested: int
+    deducted: bool = Field(..., description="本次请求是否实际执行了扣减")
+    retried: bool = Field(..., description="是否为同单号同参数的幂等重试")
+    message: str
+    created_at: str
+
+
+class RequisitionItem(BaseModel):
+    """近期领料记录列表项。"""
+
+    order_no: str
+    width_mm: float
+    height_mm: float
+    pages: int
+    labels_placed: int
+    labels_requested: int
+    created_at: str
