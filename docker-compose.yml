@@ -1,0 +1,8 @@
+services:
+  label-imposition:
+    build: .
+    image: label-imposition:latest
+    container_name: label-imposition
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

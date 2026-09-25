@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小批量标签拼版工具</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>小批量标签拼版工具</h1>
+    <span class="subtitle">毫米坐标 · 自动排版 · 续页 · 首张纸占用区避让 · 可打印 SVG 导出</span>
+  </header>
+
+  <main class="layout">
+    <!-- 左侧：参数面板 -->
+    <section class="panel">
+      <form id="params-form">
+        <fieldset>
+          <legend>纸张</legend>
+          <div class="row">
+            <label>预设
+              <select id="preset">
+                <option value="">自定义</option>
+                <option value="210,297" selected>A4 纵向（210 × 297）</option>
+                <option value="297,210">A4 横向（297 × 210）</option>
+                <option value="148,210">A5 纵向（148 × 210）</option>
+                <option value="210,148">A5 横向（210 × 148）</option>
+                <option value="215.9,279.4">Letter 纵向</option>
+                <option value="279.4,215.9">Letter 横向</option>
+              </select>
+            </label>
+          </div>
+          <div class="row two">
+            <label>纸宽 (mm)<input type="number" id="page-width" value="210" step="0.5" min="1" required /></label>
+            <label>纸高 (mm)<input type="number" id="page-height" value="297" step="0.5" min="1" required /></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>页边距 (mm)</legend>
+          <div class="row four">
+            <label>上<input type="number" id="margin-top" value="8" step="0.5" min="0" /></label>
+            <label>右<input type="number" id="margin-right" value="8" step="0.5" min="0" /></label>
+            <label>下<input type="number" id="margin-bottom" value="8" step="0.5" min="0" /></label>
+            <label>左<input type="number" id="margin-left" value="8" step="0.5" min="0" /></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>裁切间距 (mm)</legend>
+          <div class="row two">
+            <label>水平间距<input type="number" id="gap-x" value="2" step="0.5" min="0" /></label>
+            <label>垂直间距<input type="number" id="gap-y" value="2" step="0.5" min="0" /></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>首张纸占用区（mm，可多个）</legend>
+          <p class="hint">复用已贴过标签的纸张：以纸张左上角为原点填写已占用矩形，
+            新标签会自动避让并保持裁切间距；放不下的份数续排到空白页。越界会报错。</p>
+          <div class="zone-head">
+            <span></span><span>左上角 X</span><span>左上角 Y</span><span>宽</span><span>高</span><span></span>
+          </div>
+          <div id="zone-rows"></div>
+          <button type="button" id="add-zone" class="ghost">＋ 添加占用区</button>
+        </fieldset>
+
+        <fieldset>
+          <legend>标签规格</legend>
+          <p class="hint">勾选「编号」可为每种标签设置流水号（前缀、起始整数、补零位数）：
+            排版后按页码、页内从上到下再从左到右的实际位置连续编号，旋转、首页占用区与
+            续页均不跳号 / 重号，未排入份数不消耗编号；编号会印在标签内部。</p>
+          <div id="label-rows"></div>
+          <button type="button" id="add-label" class="ghost">＋ 添加一种标签</button>
+        </fieldset>
+
+        <fieldset>
+          <legend>打印位置校准（可选）</legend>
+          <p class="hint">打印机走纸误差会让标签整体偏移 / 缩放。先按当前纸张尺寸
+            <strong>100% 缩放</strong>打印校准测试页（关闭「适应页面」），用尺测量每条基准刻线
+            在纸上的实际位置——竖直实线量到纸<strong>左缘</strong>、水平虚线量到纸<strong>顶缘</strong>，
+            填入实测列后计算校准参数。校准仅作用于下载 / 打印的 SVG，
+            页面预览与 <code>/api/layout</code> 的坐标、数量保持原样。</p>
+          <button type="button" id="cal-download" class="ghost">① 打开 / 下载校准测试页（按当前纸张）</button>
+          <div class="cal-tables">
+            <div class="cal-table">
+              <div class="cal-head"><span>刻线</span><span>设计 X (mm)</span><span>实测 X (mm)</span></div>
+              <div id="cal-x-rows"></div>
+            </div>
+            <div class="cal-table">
+              <div class="cal-head"><span>刻线</span><span>设计 Y (mm)</span><span>实测 Y (mm)</span></div>
+              <div id="cal-y-rows"></div>
+            </div>
+          </div>
+          <button type="button" id="cal-solve" class="ghost">② 计算 X / Y 校准参数</button>
+          <div id="cal-result" class="cal-result muted">尚未计算校准参数。</div>
+          <label class="inline cal-enable"><input type="checkbox" id="cal-enabled" /> 下载 / 打印 SVG 时应用校准逆变换补偿</label>
+        </fieldset>
+
+        <button type="submit" class="primary">生成拼版</button>
+      </form>
+    </section>
+
+    <!-- 右侧：结果面板 -->
+    <section class="panel result">
+      <div id="summary" class="summary empty">填写参数后点击「生成拼版」。</div>
+
+      <div id="preview-wrap" class="preview-wrap" hidden>
+        <div class="toolbar">
+          <div class="pager">
+            <button type="button" id="prev-page">‹ 上一页</button>
+            <span id="page-info">1 / 1</span>
+            <button type="button" id="next-page">下一页 ›</button>
+          </div>
+          <div class="toggles">
+            <label class="inline"><input type="checkbox" id="show-margins" checked /> 页边距参考线</label>
+            <label class="inline"><input type="checkbox" id="show-annotations" checked /> 标签标注</label>
+          </div>
+          <div class="actions">
+            <button type="button" id="download-svg">下载本页 SVG</button>
+            <button type="button" id="download-all">下载全部页</button>
+            <button type="button" id="print-all">打印全部页</button>
+          </div>
+        </div>
+        <div class="reprint-bar">
+          <label class="inline" title="按页点选漏印 / 损坏的标签，只导出这些标签的原位补印 SVG">
+            <input type="checkbox" id="reprint-mode" /> 原位补印模式
+          </label>
+          <span id="reprint-hint" class="hint-inline" hidden>
+            点击预览中的标签即可选中 / 取消（角标为页内序号，从 1 开始）；
+            补印 SVG 只画选中标签，坐标与流水号保持原排版，未选位置、页码与边距线留白。
+          </span>
+          <span id="reprint-status" class="reprint-status" hidden></span>
+          <button type="button" id="reprint-clear" hidden>清空本页选择</button>
+          <button type="button" id="reprint-export" class="reprint-export" hidden>导出本页补印 SVG</button>
+        </div>
+        <div id="svg-host" class="svg-host"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
